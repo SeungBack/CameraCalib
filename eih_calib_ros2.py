@@ -17,9 +17,15 @@ import threading
 # For simplicity, I'll assume gvc-like functions are adapted or replaced.
 
 def pq_to_se3(pos, quat):
+    # input quat = [x, y, z, w] (xyzw)
     """Converts position and quaternion to a 4x4 SE(3) matrix."""
     se3 = tfs.affines.compose(pos, tfs.quaternions.quat2mat([quat[3], quat[0], quat[1], quat[2]]), [1, 1, 1])
     return se3
+def se3_to_pq(se3):
+    """Converts a 4x4 SE(3) matrix to position and quaternion."""
+    pos, rot_mat, _, _ = tfs.affines.decompose(se3)
+    quat = tfs.quaternions.mat2quat(rot_mat)  # w, x, y, z
+    return pos, np.array([quat[1], quat[2], quat[3], quat[0]])  # Convert to xyzw order
 
 def se3_to_transform_stamped(se3, parent_frame, child_frame, time):
     """Converts a 4x4 SE(3) matrix to a TransformStamped message."""
@@ -69,11 +75,11 @@ class EyeInHandCalib(Node):
                 ('rgb_topic', '/camera/color/image_raw'),
                 ('marker_dict', 'DICT_6X6_250'),
                 ('board_wh', [5, 7]),
-                ('square_len', 0.041),
-                ('marker_len', 0.0327),
+                ('square_len', 0.0402),
+                ('marker_len', 0.0320),
                 ('camera_base_frame', 'camera_link'),
                 ('camera_optical_frame', 'camera_color_optical_frame'),
-                ('robot_base_frame', 'base'),
+                ('robot_base_frame', 'base_link'),
                 ('robot_hand_frame', 'tool0') # same as the wrist_3_link for UR
             ])
 
@@ -222,13 +228,14 @@ class EyeInHandCalib(Node):
         rot = tfs.quaternions.quat2mat([quat[3], quat[0], quat[1], quat[2]])
         return rot, pos
 
+
     def run_calibration_logic(self):
         while rclpy.ok():
             key = input("s: capture / c: compute / q: quit \n")
             if key == "s":
                 try:
                     ts_base2hand = self.tf_buffer.lookup_transform(self.robot_base_frame, self.robot_hand_frame, rclpy.time.Time())
-                    ts_cam2target = self.tf_buffer.lookup_transform(self.camera_base_frame, "aruco_markerboard", rclpy.time.Time())
+                    ts_cam2target = self.tf_buffer.lookup_transform(self.camera_optical_frame, "aruco_markerboard", rclpy.time.Time())
                     
                     (hbr, hbt) = self.transform_stamped_to_opencv_rot_tr(ts_base2hand)
                     (mcr, mct) = self.transform_stamped_to_opencv_rot_tr(ts_cam2target)
@@ -259,13 +266,22 @@ class EyeInHandCalib(Node):
                 quat_wxyz = tfs.quaternions.mat2quat(hand_camera_rot) # w,x,y,z
                 quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
 
-                H_hand_to_cambase = pq_to_se3(pos, quat_xyzw)
+                H_hand_to_cam_optical = pq_to_se3(pos, quat_xyzw)
 
-                self.get_logger().info(f"Computed results {self.robot_hand_frame}_to_{self.camera_base_frame}")
-                self.get_logger().info(f"matrix: \n{str(H_hand_to_cambase)}")
+                self.get_logger().info(f"Computed results {self.robot_hand_frame}_to_{self.camera_optical_frame}")
+                self.get_logger().info(f"matrix: \n{str(H_hand_to_cam_optical)}")
                 self.get_logger().info(f"pos: {str(pos)}, quat (xyzw): {str(quat_xyzw)}")
-                
-                self.ts_hand_to_cam = se3_to_transform_stamped(H_hand_to_cambase, self.robot_hand_frame, self.camera_base_frame, self.get_clock().now().to_msg())
+
+                ts_base_to_cam_optical = self.tf_buffer.lookup_transform(self.camera_base_frame, self.camera_optical_frame, rclpy.time.Time())
+                pos, quat = transform_stamped_to_pq(ts_base_to_cam_optical)
+                H_cam_base_to_cam_optical = pq_to_se3(pos, quat)
+                H_hand_to_cam_base = np.matmul(H_hand_to_cam_optical, np.linalg.inv(H_cam_base_to_cam_optical))
+                pos, quat = se3_to_pq(H_hand_to_cam_base)
+                self.get_logger().info(f"Computed results {self.robot_hand_frame}_to_{self.camera_base_frame}")
+                self.get_logger().info(f"matrix: \n{str(H_hand_to_cam_base)}")
+                self.get_logger().info(f"pos: {str(pos)}, quat (xyzw): {str(quat)}")
+                # Publish the static transform
+                self.ts_hand_to_cam = se3_to_transform_stamped(H_hand_to_cam_base, self.robot_hand_frame, self.camera_base_frame, self.get_clock().now().to_msg())
                 self.get_logger().info(f"Publishing the hand-eye calibration result as a static TF ({self.robot_hand_frame} -> {self.camera_base_frame})")
                 self.static_br.sendTransform(self.ts_hand_to_cam)
 
