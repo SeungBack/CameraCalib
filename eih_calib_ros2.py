@@ -79,7 +79,7 @@ class EyeInHandCalib(Node):
                 ('marker_len', 0.0320),
                 ('camera_base_frame', 'camera_link'),
                 ('camera_optical_frame', 'camera_color_optical_frame'),
-                ('robot_base_frame', 'base_link'),
+                ('robot_base_frame', 'base'),
                 ('robot_hand_frame', 'tool0') # same as the wrist_3_link for UR
             ])
 
